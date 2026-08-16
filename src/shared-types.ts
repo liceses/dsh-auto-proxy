@@ -21,6 +21,8 @@ export interface AutoProxySettings {
   gitApply: boolean
   /** Target URL the connectivity probe hits (proxy_test / card test button). */
   testUrl: string
+  /** System-proxy polling interval in seconds (0 disables; default 30). */
+  pollSeconds?: number
   /** Internal: previous git global http.proxy, for restore on disable. */
   _gitPrevHttp?: string
   /** Internal: previous git global https.proxy, for restore on disable. */

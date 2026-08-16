@@ -25,8 +25,9 @@ import type {} from '@deepseek-ai/dsh-shell-env'
 import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import type {} from '@deepseek-ai/cordis-plugin-timer'
 import type { AutoProxySettings, ResolvedProxy } from './shared-types.ts'
-import { buildGitAdvice, exportBlock, gitProxyUrl, resolveProxy } from './proxy.ts'
+import { buildGitAdvice, compareProxy, exportBlock, gitProxyUrl, resolveProxy } from './proxy.ts'
 import { probeUrl } from './probe.ts'
 import { applyGitProxy, currentHttpProxy, currentHttpsProxy, gitProxyStatus, restoreGitProxy } from './git.ts'
 import { buildProxyPrompt } from './prompt.ts'
@@ -49,10 +50,14 @@ const Config = z.object({
   noProxy: z.string().default(''),
   gitApply: z.boolean().default(false),
   testUrl: z.string().default('https://www.google.com/generate_204'),
+  pollSeconds: z.number().default(30),
 })
 
-/** Cache window for proxy re-resolution (registry queries are ~50ms each). */
-const RESOLVE_TTL_MS = 5000
+/**
+ * Cache window for proxy re-resolution. 1s: the polling loop now owns the
+ * de-duplication duty, so a lazy caller never serves a plan older than ~1s.
+ */
+const RESOLVE_TTL_MS = 1000
 
 /**
  * Mount the plugin.
@@ -61,6 +66,11 @@ const RESOLVE_TTL_MS = 5000
  */
 export function apply(ctx: Context, config: unknown = {}): void {
   const scope = ctx.settings.register(SETTINGS_NS, Config, { base: config as Partial<AutoProxySettings> | undefined })
+
+  // The settings service types the owner scope with schemastery's loose
+  // ObjectS (fields may be null/undefined); our domain type is stricter.
+  // One narrowing point keeps every consumer on AutoProxySettings.
+  const readSettings = (): AutoProxySettings => scope.get() as unknown as AutoProxySettings
 
   // ---- proxy plan holder + refresh (TTL-cached) -------------------------------
   let current: ResolvedProxy = { mode: 'off', source: 'none', http: '', https: '', socks: '', noProxy: '', ready: false, detail: 'off' }
@@ -71,7 +81,7 @@ export function apply(ctx: Context, config: unknown = {}): void {
     const now = Date.now()
     if (now - lastResolveAt < RESOLVE_TTL_MS && resolveChain !== null) return resolveChain
     lastResolveAt = now
-    resolveChain = resolveProxy(scope.get(), process.env).then((resolved) => {
+    resolveChain = resolveProxy(readSettings(), process.env).then((resolved) => {
       current = resolved
       return resolved
     })
@@ -82,7 +92,7 @@ export function apply(ctx: Context, config: unknown = {}): void {
   // ---- gitApply: mirror the plan into the git global config -------------------
   const handleGitApply = async (next: boolean, previous: boolean): Promise<void> => {
     if (next === previous) return
-    const settings = scope.get()
+    const settings = readSettings()
     const resolved = await refresh()
     if (next) {
       const [prevHttp, prevHttps] = await Promise.all([currentHttpProxy(), currentHttpsProxy()])
@@ -106,21 +116,50 @@ export function apply(ctx: Context, config: unknown = {}): void {
     }
   }
 
-  let prevGitApply = scope.get().gitApply
+  let prevGitApply = readSettings().gitApply
   scope.watch((next, previous) => {
     void refresh()
-    if (next.gitApply !== previous.gitApply) {
-      prevGitApply = next.gitApply
-      void handleGitApply(next.gitApply, previous.gitApply)
+    const nextSettings = next as unknown as AutoProxySettings
+    const previousSettings = previous as unknown as AutoProxySettings
+    if (nextSettings.gitApply !== previousSettings.gitApply) {
+      prevGitApply = nextSettings.gitApply
+      void handleGitApply(nextSettings.gitApply, previousSettings.gitApply)
     }
   })
   // Apply at boot when the composition base already asks for it.
   void refresh().then(() => {
-    if (scope.get().gitApply && !prevGitApply) {
+    if (readSettings().gitApply && !prevGitApply) {
       prevGitApply = true
       void handleGitApply(true, false)
     }
   })
+
+  // ---- live polling: track system-proxy changes so the injected variables
+  // and the prompt never go stale (e.g. the proxy software switches ports).
+  // The current plan is swapped in place; every consumer (shell-env resolver,
+  // prompt section, tools, routes) reads it lazily, so a change propagates to
+  // the next shell call / model step with no further work. Uses the platform
+  // timer inside a fiber effect (the cordis timer plugin is optional in some
+  // deployments), so stop/update/undefine disposes the loop automatically.
+  const pollSeconds = Math.max(1, Math.min(3600, readSettings().pollSeconds ?? 30))
+  if (pollSeconds > 0) {
+    ctx.effect(() => {
+      const timer = setInterval(() => {
+        void (async () => {
+          try {
+            const before = current
+            const after = await refresh()
+            if (!compareProxy(before, after)) {
+              ctx.logger.info('auto-proxy: 系统代理变化 %s -> %s', before.detail, after.detail)
+            }
+          } catch (error) {
+            ctx.logger.warn('auto-proxy: 轮询系统代理失败: %s', error instanceof Error ? error.message : String(error))
+          }
+        })()
+      }, pollSeconds * 1000)
+      return () => clearInterval(timer)
+    }, 'auto-proxy: system-proxy poll')
+  }
 
   // ---- shell-env contributor: DSH_PROXY_* into every shell call ---------------
   ctx.shellEnv.register({
@@ -228,7 +267,7 @@ export function apply(ctx: Context, config: unknown = {}): void {
     },
     async execute(args) {
       const resolved = await refresh()
-      const target = (args.url ?? '').trim() !== '' ? args.url!.trim() : scope.get().testUrl
+      const target = (args.url ?? '').trim() !== '' ? args.url!.trim() : readSettings().testUrl
       const result = await probeUrl(resolved, target, args.timeoutMs ?? 10000)
       return {
         ok: result.ok,
@@ -281,7 +320,7 @@ export function apply(ctx: Context, config: unknown = {}): void {
           return { ok: false, applied: false, value: '', error: outcome.error ?? '未知错误' }
         }
       } else {
-        const settings = scope.get()
+        const settings = readSettings()
         const outcome = await restoreGitProxy(settings._gitPrevHttp, settings._gitPrevHttps)
         await ctx.settings.mutate(SETTINGS_NS, [
           { op: 'unset', path: ['_gitPrevHttp'] },
@@ -334,7 +373,7 @@ export function apply(ctx: Context, config: unknown = {}): void {
       void (async () => {
         try {
           if (req.method === 'GET') {
-            const value = scope.get()
+            const value = readSettings()
             const { _gitPrevHttp: _prevHttp, _gitPrevHttps: _prevHttps, ...visible } = value
             sendJson(res, { value: visible, writable: ctx.settings.writable })
             return
@@ -402,7 +441,7 @@ export function apply(ctx: Context, config: unknown = {}): void {
             // non-JSON body: ignore
           }
           const resolved = await refresh()
-          const result = await probeUrl(resolved, url ?? scope.get().testUrl, 10000)
+          const result = await probeUrl(resolved, url ?? readSettings().testUrl, 10000)
           sendJson(res, {
             ok: result.ok,
             via: result.via,

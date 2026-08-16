@@ -25,6 +25,7 @@ export const DEFAULT_SETTINGS: AutoProxySettings = {
   noProxy: '',
   gitApply: false,
   testUrl: 'https://www.google.com/generate_204',
+  pollSeconds: 30,
 }
 
 /** Normalize a raw host:port / URL string into a proxy URL with the given scheme. */
@@ -226,4 +227,20 @@ export function buildGitAdvice(resolved: ResolvedProxy): string {
     return 'git 走 HTTP 代理：`git -c http.proxy=$DSH_PROXY_HTTP -c https.proxy=$DSH_PROXY_HTTP <子命令>`；或调用 proxy_git 工具一键应用/清除全局 git 代理。'
   }
   return 'git 走 HTTP 代理（HTTPS 流量经 CONNECT 隧道）：`git -c http.proxy=$DSH_PROXY_HTTPS -c https.proxy=$DSH_PROXY_HTTPS <子命令>`；或调用 proxy_git 工具一键应用/清除全局 git 代理。'
+}
+
+/**
+ * Whether two plans differ in any value the shell/prompt consumes.
+ * Used by the polling loop to detect system-proxy changes and decide whether
+ * anything needs to be announced (the shell variables and prompt read the
+ * current plan lazily, so swapping it is all an update needs).
+ */
+export function compareProxy(a: ResolvedProxy, b: ResolvedProxy): boolean {
+  return a.mode === b.mode
+    && a.source === b.source
+    && a.http === b.http
+    && a.https === b.https
+    && a.socks === b.socks
+    && a.noProxy === b.noProxy
+    && a.ready === b.ready
 }

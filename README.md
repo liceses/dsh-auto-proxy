@@ -38,6 +38,7 @@ dsh plugin --profile web add @icelily/dsh-auto-proxy
 | `noProxy` | NO_PROXY 逗号列表 | `''` |
 | `gitApply` | 是否同步到 git 全局配置（可精确还原原值） | `false` |
 | `testUrl` | 连通性探测目标 | `https://www.google.com/generate_204` |
+| `pollSeconds` | 系统代理轮询间隔（秒，0 关闭；默认 30） | `30` |
 
 也可在 profile 的插件行配置（composition base）覆盖默认值：
 
@@ -85,6 +86,12 @@ npm run build          # tsc + tsdown
 node smoke.mjs         # 解析/探测逻辑冒烟（走真实 v2RayN 10808 SOCKS）
 # 运行时：任意 bash 命令 `env | grep DSH_PROXY`；GET /api/dsh-auto-proxy/status
 ```
+
+## 实时监测
+
+- **轮询**：默认每 30 秒读取一次系统代理（`pollSeconds` 可调），检测到变化（如代理软件换端口）立即更新 `current` 计划——下一个 shell 命令注入的 `DSH_PROXY_*`、下一步系统提示、以及 status/test 路由全部自动反映新值；无变化零开销（仅一次注册表查询）。
+- **惰性刷新**：任何工具调用/路由访问都会按需重解析（1 秒 TTL 去抖），所以设置保存后立即生效。
+- 轮询用平台原生 `setInterval` 挂在 fiber effect 上，插件停止/热重载/卸载自动清理。
 
 ## 已知边界
 

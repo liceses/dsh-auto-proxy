@@ -81,6 +81,7 @@ const EMPTY: AutoProxySettings = {
   noProxy: '',
   gitApply: false,
   testUrl: 'https://www.google.com/generate_204',
+  pollSeconds: 30,
 }
 
 interface SettingsView {
