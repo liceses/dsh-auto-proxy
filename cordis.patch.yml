@@ -1,0 +1,14 @@
+# dsh-auto-proxy bundle patch: inserts the plugin row into the web profile
+# roster. Applied as a profile bundle layer (the `dsh.bundle.patch` manifest
+# field); activate with `dsh plugin --profile <name> add <package>` or through
+# the super-module injector (dev_install_package).
+#
+# The row is a bare plugin by package name: the node half (exports ".") runs
+# in the host process (settings namespace, shell-env contributor, prompt
+# section, tools, webServer routes), and the `dsh.client` declaration in
+# package.json makes the browser half (exports "./client", served at
+# /plugins/<id>/client.js) load in the web GUI, registering the configuration
+# card under Settings > Plugins > 插件配置.
+- insert:
+    - id: auto-proxy
+      name: '@icelily/dsh-auto-proxy'
