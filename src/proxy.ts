@@ -38,6 +38,27 @@ function toProxyUrl(raw: string, scheme: 'http' | 'https' | 'socks5h'): string {
   return `${scheme}://${value}${hasPort ? '' : `:${defaultPort}`}`
 }
 
+/**
+ * The https slot of a proxy plan must carry an `http://` URL: Windows
+ * registry `https=host:port` and `HTTPS_PROXY` both mean "forward HTTPS
+ * traffic through this proxy", and the proxy's own protocol is HTTP
+ * (CONNECT tunnelling). An `https://` prefix would make curl/git attempt a
+ * TLS connection to the proxy itself — that is exactly the kind of value
+ * that looks wrong to an agent and breaks real tools.
+ */
+function toHttpTunnelUrl(raw: string, defaultPort: number): string {
+  const value = raw.trim()
+  if (value === '') return ''
+  if (/^https?:\/\//i.test(value)) {
+    // Normalize https:// (or keep http://) to a plain http:// CONNECT URL.
+    const url = new URL(value)
+    return `http://${url.hostname}${url.port !== '' ? `:${url.port}` : ''}`
+  }
+  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return value
+  const hasPort = /:\d+$/.test(value)
+  return `http://${value}${hasPort ? '' : `:${defaultPort}`}`
+}
+
 /** Parse a Windows Internet Settings ProxyServer value into per-scheme raw entries. */
 export function parseProxyServer(raw: string): { http: string; https: string; socks: string } {
   const parts = raw.split(';').map((part) => part.trim()).filter(Boolean)
@@ -113,8 +134,8 @@ export async function resolveProxy(settings: AutoProxySettings, env: NodeJS.Proc
     return { mode: 'off', source: 'none', http: '', https: '', socks: '', noProxy: '', ready: false, detail: 'off（未启用代理）' }
   }
   if (settings.mode === 'manual') {
-    const http = toProxyUrl(settings.http, 'http')
-    const https = toProxyUrl(settings.https, 'https')
+    const http = toHttpTunnelUrl(settings.http, 80)
+    const https = toHttpTunnelUrl(settings.https, 443)
     const socks = toProxyUrl(settings.socks, 'socks5h')
     const ready = http !== '' || https !== '' || socks !== ''
     const entries = [http && `HTTP ${http}`, https && `HTTPS ${https}`, socks && `SOCKS ${socks}`].filter(Boolean)
@@ -133,8 +154,8 @@ export async function resolveProxy(settings: AutoProxySettings, env: NodeJS.Proc
   if (process.platform === 'win32') {
     const fromRegistry = await detectWindowsProxy()
     if (fromRegistry !== null) {
-      const http = toProxyUrl(fromRegistry.http, 'http')
-      const https = toProxyUrl(fromRegistry.https, 'https')
+      const http = toHttpTunnelUrl(fromRegistry.http, 80)
+      const https = toHttpTunnelUrl(fromRegistry.https, 443)
       const socks = toProxyUrl(fromRegistry.socks, 'socks5h')
       const ready = http !== '' || https !== '' || socks !== ''
       return {
@@ -151,8 +172,8 @@ export async function resolveProxy(settings: AutoProxySettings, env: NodeJS.Proc
   }
   const fromEnv = detectFromEnv(env)
   if (fromEnv !== null) {
-    const http = toProxyUrl(fromEnv.http, 'http')
-    const https = toProxyUrl(fromEnv.https, 'https')
+    const http = toHttpTunnelUrl(fromEnv.http, 80)
+    const https = toHttpTunnelUrl(fromEnv.https, 443)
     const socks = toProxyUrl(fromEnv.socks, 'socks5h')
     const ready = http !== '' || https !== '' || socks !== ''
     return {
@@ -192,4 +213,17 @@ export function gitProxyUrl(resolved: ResolvedProxy): string {
   if (resolved.socks !== '') return resolved.socks
   if (resolved.https !== '') return resolved.https
   return resolved.http
+}
+
+/** Ready-to-use git advice line for the prompt and the proxy_env tool. */
+export function buildGitAdvice(resolved: ResolvedProxy): string {
+  if (!resolved.ready) return '当前无可用代理，git 不走代理；直连失败时先检查代理软件是否在运行。'
+  if (resolved.socks !== '') {
+    return 'git 走 socks5h（DNS 走代理防污染）：`git -c http.proxy=$DSH_PROXY_SOCKS -c https.proxy=$DSH_PROXY_SOCKS <子命令>`；或调用 proxy_git 工具一键应用/清除全局 git 代理。'
+  }
+  const url = resolved.https !== '' ? '$DSH_PROXY_HTTPS' : '$DSH_PROXY_HTTP'
+  if (url === '$DSH_PROXY_HTTP') {
+    return 'git 走 HTTP 代理：`git -c http.proxy=$DSH_PROXY_HTTP -c https.proxy=$DSH_PROXY_HTTP <子命令>`；或调用 proxy_git 工具一键应用/清除全局 git 代理。'
+  }
+  return 'git 走 HTTP 代理（HTTPS 流量经 CONNECT 隧道）：`git -c http.proxy=$DSH_PROXY_HTTPS -c https.proxy=$DSH_PROXY_HTTPS <子命令>`；或调用 proxy_git 工具一键应用/清除全局 git 代理。'
 }

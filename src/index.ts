@@ -26,7 +26,7 @@ import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-tools'
 import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { AutoProxySettings, ResolvedProxy } from './shared-types.ts'
-import { exportBlock, gitProxyUrl, resolveProxy } from './proxy.ts'
+import { buildGitAdvice, exportBlock, gitProxyUrl, resolveProxy } from './proxy.ts'
 import { probeUrl } from './probe.ts'
 import { applyGitProxy, currentHttpProxy, currentHttpsProxy, gitProxyStatus, restoreGitProxy } from './git.ts'
 import { buildProxyPrompt } from './prompt.ts'
@@ -179,9 +179,6 @@ export function apply(ctx: Context, config: unknown = {}): void {
     },
     async execute() {
       const resolved = await refresh()
-      const git = resolved.ready
-        ? `git -c http.proxy='${gitProxyUrl(resolved)}' -c https.proxy='${gitProxyUrl(resolved)}' <子命令>（或调用 proxy_git 工具应用全局配置）`
-        : '当前无可用代理，git 不走代理。'
       return {
         mode: resolved.mode,
         source: resolved.source,
@@ -191,7 +188,7 @@ export function apply(ctx: Context, config: unknown = {}): void {
         socks: resolved.socks,
         noProxy: resolved.noProxy,
         block: exportBlock(resolved),
-        git,
+        git: buildGitAdvice(resolved),
       }
     },
   }))

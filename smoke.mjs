@@ -8,6 +8,10 @@ const results = []
 // 1. manual resolution (user-specified schemes are preserved)
 const manual = await resolveProxy({ mode: 'manual', http: '127.0.0.1:8080', https: 'http://127.0.0.1:8080', socks: 'socks5://127.0.0.1:10808', noProxy: 'localhost,.internal', gitApply: false, testUrl: 'https://www.google.com/generate_204' })
 results.push(['manual resolve', manual.http === 'http://127.0.0.1:8080' && manual.socks === 'socks5://127.0.0.1:10808' && manual.ready])
+
+// 1b. https:// prefix on the https slot normalizes to http:// (CONNECT semantics)
+const httpsPrefixed = await resolveProxy({ mode: 'manual', http: '', https: 'https://127.0.0.1:10808', socks: '', noProxy: '', gitApply: false, testUrl: 'x' })
+results.push(['https prefix normalized', httpsPrefixed.https === 'http://127.0.0.1:10808'])
 console.log('manual:', JSON.stringify(manual, null, 0))
 
 // 2. off mode
