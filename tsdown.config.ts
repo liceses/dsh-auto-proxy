@@ -20,8 +20,14 @@ const PLATFORM_MODULES = [
   '@deepseek-ai/dsh-client-schema-form',
 ] as const
 
-/** Externals resolved from the loader module table (platform seeds + runtime exemption). */
-const CLIENT_EXTERNALS: readonly string[] = [...PLATFORM_MODULES, '@deepseek-ai/dsh-client-runtime/client']
+/** Externals resolved from the loader module table (platform seeds + the
+ * settings domain row; 0.1.2 moved the runtime's client face into
+ * `dsh-client-store` and the scope contract into `dsh-client-ui-settings`). */
+const CLIENT_EXTERNALS: readonly string[] = [
+  ...PLATFORM_MODULES,
+  '@deepseek-ai/dsh-client-store',
+  '@deepseek-ai/dsh-client-ui-settings/client',
+]
 
 /** Node-half library: the host plugin. */
 const nodeConfig: UserConfig = {

@@ -1,17 +1,18 @@
 /**
  * dsh-auto-proxy — browser half controller.
  *
- * The web client cannot bind third-party settings namespaces through the
- * official `settingsScope` transport: dsh-host-apiproxy only exposes a
- * hard-coded whitelist of namespaces (`settings-not-exposed` otherwise, which
- * surfaces as an unavailable read-only scope and disables every control).
- * This controller therefore talks to the host's own /api/dsh-auto-proxy
- * routes instead — the host writes through the settings service directly
- * (schema validation, revision fencing and file persistence included).
+ * rc7 removed the settings-namespace whitelist: every registered namespace is
+ * served through the official `settingsScope` transport, so this card binds
+ * the `auto-proxy` namespace and reads/writes it through the scope (revision
+ * fencing, host validation and persistence included) instead of a self-built
+ * REST channel. Live proxy status and connectivity probes are runtime data —
+ * not settings — and still come from the host's /api/dsh-auto-proxy/status
+ * and /api/dsh-auto-proxy/test routes.
  * All state mirrors into one snapshot store the card renders through.
  */
 
-import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
+import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-store'
+import type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
 import type { AutoProxySettings } from '../shared-types.ts'
 
 /** Live proxy status served by the host. */
@@ -84,20 +85,11 @@ const EMPTY: AutoProxySettings = {
   pollSeconds: 30,
 }
 
-interface SettingsView {
-  value?: AutoProxySettings
-  writable?: boolean
-  error?: string
-}
-
-/** Bridge the host settings route onto the card's snapshot store. */
+/** Bridge the bound `auto-proxy` settings scope onto the card's snapshot store. */
 export class AutoProxyCardController {
+  private readonly scope: SettingsScope<AutoProxySettings>
   private readonly store: SnapshotStore<CardSnapshot>
   private readonly staged = new Map<string, string | boolean>()
-  private value: AutoProxySettings | null = null
-  private writable = false
-  private available = false
-  private loadError: string | null = null
   private status: ProxyStatusView | null = null
   private statusError: string | null = null
   private testing = false
@@ -107,20 +99,23 @@ export class AutoProxyCardController {
   private failed = false
   private disposed = false
 
-  constructor() {
+  constructor(scope: SettingsScope<AutoProxySettings>) {
+    this.scope = scope
     this.store = createSnapshotStore(this.project())
   }
 
   /** Start the first load. Returns the disposer. */
   start(): () => void {
-    void this.refreshAll()
+    const offScope = this.scope.subscribe(() => this.publish())
+    void this.refreshStatus()
     return () => {
       this.disposed = true
+      offScope()
     }
   }
 
   private current(): AutoProxySettings {
-    return this.value ?? EMPTY
+    return this.scope.getSnapshot().value ?? EMPTY
   }
 
   private fieldText(field: string, fallback: string): string {
@@ -129,10 +124,11 @@ export class AutoProxyCardController {
   }
 
   private project(): CardSnapshot {
+    const snapshot = this.scope.getSnapshot()
     const value = this.current()
     return {
-      available: this.available,
-      writable: this.writable,
+      available: snapshot.status === 'ready',
+      writable: snapshot.writable,
       saving: this.saving,
       failed: this.failed,
       dirty: this.staged.size > 0,
@@ -142,7 +138,7 @@ export class AutoProxyCardController {
       socks: this.fieldText('socks', value.socks),
       noProxy: this.fieldText('noProxy', value.noProxy),
       gitApply: (this.staged.has('gitApply') ? this.staged.get('gitApply') : value.gitApply) as boolean,
-      loadError: this.loadError,
+      loadError: snapshot.status === 'unavailable' ? 'settings namespace not served by the host' : null,
       status: this.status,
       statusError: this.statusError,
       testing: this.testing,
@@ -161,49 +157,34 @@ export class AutoProxyCardController {
     this.publish()
   }
 
-  private async loadSettings(): Promise<void> {
-    try {
-      const response = await fetch('/api/dsh-auto-proxy/settings')
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const view = (await response.json()) as SettingsView
-      if (view.error !== undefined) throw new Error(view.error)
-      this.value = view.value ?? EMPTY
-      this.writable = view.writable === true
-      this.available = true
-      this.loadError = null
-    } catch (error) {
-      this.available = false
-      this.writable = false
-      this.loadError = error instanceof Error ? error.message : String(error)
-    }
-    this.publish()
-  }
-
   private async save(): Promise<void> {
-    if (this.saving || !this.writable || this.staged.size === 0) return
+    if (this.saving || !this.scope.getSnapshot().writable || this.staged.size === 0) return
     this.saving = true
     this.failed = false
     this.publish()
-    const set: Record<string, string | boolean> = {}
-    const unset: string[] = []
-    for (const [field, value] of this.staged) {
-      if (typeof value === 'string' && value.trim() === '') unset.push(field)
-      else set[field] = value
-    }
+    const entries = [...this.staged.entries()]
+    this.staged.clear()
     try {
-      const response = await fetch('/api/dsh-auto-proxy/settings', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ set, unset }),
-      })
-      const view = (await response.json()) as SettingsView
-      if (!response.ok || view.error !== undefined) throw new Error(view.error ?? `HTTP ${response.status}`)
-      this.value = view.value ?? this.value
-      this.writable = view.writable === true
-      this.staged.clear()
+      for (const [field, value] of entries) {
+        if (typeof value === 'string' && value.trim() === '') await this.scope.unset(field)
+        else await this.scope.set(field, value)
+      }
+      // The host is the only authority on what was accepted: an override is a
+      // key present in the user layer, so a write that did not land leaves the
+      // field absent (or with its previous value) and keeps the draft staged.
+      const user = this.scope.getSnapshot().user as Record<string, unknown> | undefined
+      for (const [field, value] of entries) {
+        const wanted = typeof value === 'string' && value.trim() === '' ? undefined : value
+        const present = user !== undefined && field in user
+        const landed = wanted === undefined ? !present : present && user![field] === wanted
+        if (!landed) {
+          this.failed = true
+          this.staged.set(field, value)
+        }
+      }
     } catch (error) {
       this.failed = true
-      this.loadError = error instanceof Error ? error.message : String(error)
+      for (const [field, value] of entries) this.staged.set(field, value)
     } finally {
       this.saving = false
       this.publish()
@@ -227,10 +208,6 @@ export class AutoProxyCardController {
       this.statusError = error instanceof Error ? error.message : String(error)
     }
     this.publish()
-  }
-
-  private async refreshAll(): Promise<void> {
-    await Promise.all([this.loadSettings(), this.refreshStatus()])
   }
 
   private async test(): Promise<void> {
