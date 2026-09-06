@@ -13,13 +13,16 @@
  *   5. Registers model tools: proxy_env (ready export block), proxy_test
  *      (connectivity probe), proxy_git (apply/clear git global proxy).
  *   6. Serves /api/dsh-auto-proxy/status + /test for the settings card.
+ *
+ * The settings card itself reads/writes the `auto-proxy` namespace through
+ * the official settings wire (rc7 exposes every registered namespace), so no
+ * self-built settings REST channel is needed.
  */
 
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { settingsNamespace } from '@deepseek-ai/dsh-settings'
-import type { SettingsPathOp } from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-settings'
 import type {} from '@deepseek-ai/dsh-shell-env'
 import type {} from '@deepseek-ai/dsh-system-prompt'
@@ -365,61 +368,6 @@ export function apply(ctx: Context, config: unknown = {}): void {
       })()
     },
   }), 'auto-proxy: status route')
-
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'exact',
-    path: '/api/dsh-auto-proxy/settings',
-    handler: (req, res) => {
-      void (async () => {
-        try {
-          if (req.method === 'GET') {
-            const value = readSettings()
-            const { _gitPrevHttp: _prevHttp, _gitPrevHttps: _prevHttps, ...visible } = value
-            sendJson(res, { value: visible, writable: ctx.settings.writable })
-            return
-          }
-          if (req.method === 'POST') {
-            let body = ''
-            req.on('data', (chunk: Buffer) => {
-              body += chunk.toString('utf8')
-              if (body.length > 8192) req.destroy()
-            })
-            await new Promise<void>((resolve) => req.on('end', () => resolve()))
-            const parsed = JSON.parse(body === '' ? '{}' : body) as {
-              set?: Record<string, string | boolean>
-              unset?: string[]
-            }
-            if (parsed === null || typeof parsed !== 'object') throw new Error('请求体必须是 JSON 对象')
-            const ops: SettingsPathOp[] = []
-            if (parsed.set !== undefined) {
-              for (const [field, value] of Object.entries(parsed.set)) {
-                if (typeof value !== 'string' && typeof value !== 'boolean') throw new Error(`字段 ${field} 的值必须是字符串或布尔`)
-                ops.push({ op: 'set', path: [field], value })
-              }
-            }
-            if (parsed.unset !== undefined) {
-              for (const field of parsed.unset) {
-                if (typeof field !== 'string') throw new Error('unset 字段名必须是字符串')
-                ops.push({ op: 'unset', path: [field] })
-              }
-            }
-            if (ops.length === 0) {
-              sendJson(res, { ok: true })
-              return
-            }
-            await ctx.settings.mutate(SETTINGS_NS, ops)
-            const value = scope.get()
-            const { _gitPrevHttp: _prevHttp, _gitPrevHttps: _prevHttps, ...visible } = value
-            sendJson(res, { ok: true, value: visible, writable: ctx.settings.writable })
-            return
-          }
-          sendJson(res, { error: `不支持的方法 ${req.method ?? '?'}` }, 405)
-        } catch (error) {
-          sendJson(res, { error: error instanceof Error ? error.message : String(error) }, 400)
-        }
-      })()
-    },
-  }), 'auto-proxy: settings route')
 
   ctx.effect(() => ctx.webServer.register({
     kind: 'exact',

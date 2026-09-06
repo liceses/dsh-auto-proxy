@@ -69,13 +69,13 @@ dsh plugin --profile web add @icelily/dsh-auto-proxy
 
 ```
 src/
-  index.ts         宿主入口：settings 命名空间、shellEnv 注入、prompt section、3 个工具、2 个路由
+  index.ts         宿主入口：settings 命名空间、shellEnv 注入、prompt section、3 个工具、2 个路由（status/test）
   proxy.ts         代理解析（注册表 / 环境变量 / 手动）+ export 块生成
   probe.ts         连通性探测（CONNECT 隧道、SOCKS5 握手、直连，node:net/tls 实现）
   git.ts           git 全局代理应用 / 还原
   prompt.ts        系统提示 section 构建
   shared-types.ts  宿主/客户端共享类型
-  client/          浏览器半区：settings.plugin.item 卡片（controller + React 组件 + 样式）
+  client/          浏览器半区：settings.plugin.item 卡片（keyed by `auto-proxy`；controller + React 组件 + 样式）
 smoke.mjs          核心逻辑独立冒烟测试（node smoke.mjs，无需 DSH 运行时）
 ```
 
